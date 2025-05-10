@@ -42,7 +42,7 @@ The Facial Attendance System is a Python application that leverages OpenCV and c
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/facial-attendance-system.git
+   git clone https://github.com/anasraheemdev/facial-attendance-system.git
    cd facial-attendance-system
    ```
 
