@@ -5,6 +5,7 @@ import time
 import numpy as np
 import pickle
 from abc import ABC, abstractmethod
+from collections import Counter # Import Counter for mark_attendance
 
 # Directory structure setup
 DATA_DIR = "data"
@@ -29,8 +30,12 @@ class HaarCascadeDetector(FaceDetector):
     """Face detector using Haar Cascade classifier"""
     
     def __init__(self):
+        # Ensure the Haar Cascade XML file is correctly loaded
         self.__face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    
+        if self.__face_cascade.empty():
+            print("Error: Could not load Haar Cascade classifier. Make sure 'haarcascade_frontalface_default.xml' is in the OpenCV data path.")
+            exit() # Exit if the classifier can't be loaded
+
     def detect_faces(self, frame):
         """Detect faces in the given frame using Haar Cascade"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -70,6 +75,8 @@ class AdvancedFaceRecognizer(FaceRecognizer):
     def threshold(self, value):
         if 0.1 <= value <= 0.9:
             self.__threshold = value
+        else:
+            print("Warning: Threshold must be between 0.1 and 0.9. Value not set.")
     
     def __extract_features(self, face_img):
         """Extract SIFT features from face image"""
@@ -168,26 +175,24 @@ class AdvancedFaceRecognizer(FaceRecognizer):
             else:
                 sift_score = 0
                 
-        except (cv2.error, TypeError, ValueError):
-            # Fallback if SIFT doesn't work
+        except (cv2.error, TypeError, ValueError) as e:
             sift_score = 0
-        
-        # Structural Similarity Index
+            
+        # Structural Similarity Index (SSIM)
         try:
             ssim_score = cv2.matchTemplate(face1, face2, cv2.TM_CCOEFF_NORMED)[0][0]
             ssim_score = (ssim_score + 1) / 2  # Convert to 0-1 range
-        except:
+        except Exception as e:
             ssim_score = 0
             
         # Combine scores (weighted average)
         combined_score = (
-            0.3 * hist_score + 
-            0.3 * lbp_score + 
-            0.2 * sift_score + 
-            0.2 * ssim_score
+            0.35 * hist_score + 
+            0.35 * lbp_score + 
+            0.15 * sift_score + 
+            0.15 * ssim_score
         )
         
-        # Return match result and similarity score
         return combined_score >= self.__threshold, combined_score
     
     def identify_user(self, face_img):
@@ -201,27 +206,33 @@ class AdvancedFaceRecognizer(FaceRecognizer):
         # Loop through all registered users
         for filename in os.listdir(USERS_DIR):
             if filename.endswith('.pkl'):
-                # Load the user data
                 user_path = os.path.join(USERS_DIR, filename)
-                with open(user_path, 'rb') as f:
-                    user_data = pickle.load(f)
-                
+                try:
+                    with open(user_path, 'rb') as f:
+                        user_data = pickle.load(f)
+                except Exception as e:
+                    print(f"DEBUG: Error loading user data from {user_path}: {e}")
+                    continue 
+                    
                 username = user_data['name']
                 stored_faces = user_data['faces']
                 
-                # Compare with each stored face for this user
                 user_max_similarity = -1
                 
                 for stored_face in stored_faces:
+                    if not isinstance(stored_face, np.ndarray):
+                        # print(f"DEBUG: Warning: Stored face for {username} is not a numpy array. Skipping.")
+                        continue
+                    
                     match, similarity = self.compare_faces(face_img, stored_face)
                     user_max_similarity = max(user_max_similarity, similarity)
                 
-                # Update best match across all users
                 if user_max_similarity > max_similarity:
                     max_similarity = user_max_similarity
                     identified_user = username
         
-        # Check if the best match is good enough
+        print(f"DEBUG: identify_user result - User: {identified_user}, Max Similarity: {max_similarity:.2f}, Threshold: {self.__threshold:.2f}")
+
         if max_similarity >= self.__threshold:
             return identified_user, max_similarity
         else:
@@ -229,7 +240,9 @@ class AdvancedFaceRecognizer(FaceRecognizer):
 
 class FaceEnhancer:
     """Class for applying various face enhancement techniques"""
-    
+    def __init__(self):
+        pass
+
     @staticmethod
     def enhance_contrast(face_img):
         """Enhance contrast using histogram equalization"""
@@ -240,12 +253,12 @@ class FaceEnhancer:
     @staticmethod
     def reduce_noise(face_img):
         """Reduce noise using Gaussian blur"""
-        return cv2.GaussianBlur(face_img, (5, 5), 0)
+        return cv2.GaussianBlur(face_img, (5, 5), 0) 
     
     @staticmethod
     def sharpen(face_img):
         """Sharpen image using unsharp masking"""
-        blurred = cv2.GaussianBlur(face_img, (5, 5), 0)
+        blurred = cv2.GaussianBlur(face_img, (0, 0), 3) 
         return cv2.addWeighted(face_img, 1.5, blurred, -0.5, 0)
     
     @staticmethod
@@ -265,7 +278,8 @@ class AttendanceSystem:
         self.__face_detector = HaarCascadeDetector()
         self.__face_recognizer = AdvancedFaceRecognizer()
         self.__face_enhancer = FaceEnhancer()
-    
+        self.__last_marked_user = {} # Dictionary to store last marked time for each user
+
     def __capture_face(self, num_samples=5, enhance=True):
         """
         Capture multiple face images from webcam
@@ -275,283 +289,268 @@ class AttendanceSystem:
         cap = cv2.VideoCapture(0)
         
         if not cap.isOpened():
-            print("Error: Could not open camera")
+            print("Error: Could not open camera. Please check camera connection and permissions.")
             return None
         
-        # Warm up the camera
         time.sleep(1)
         
         face_samples = []
         while len(face_samples) < num_samples:
             ret, frame = cap.read()
             if not ret:
-                print("Failed to grab frame")
+                print("Failed to grab frame.")
                 break
             
-            # Detect faces
+            frame = cv2.flip(frame, 1) 
+            
             faces, gray = self.__face_detector.detect_faces(frame)
             
-            # Draw rectangles and instructions
             for (x, y, w, h) in faces:
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
             
-            # Display counter
             samples_text = f"Samples: {len(face_samples)}/{num_samples}"
             cv2.putText(frame, samples_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             cv2.putText(frame, "Press 'c' to capture or 'q' to quit", 
-                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
-            # Display the frame
             cv2.imshow('Face Capture', frame)
             
-            # Check for key press
             key = cv2.waitKey(1) & 0xFF
             if key == ord('c') and len(faces) > 0:
-                # Get the largest face
-                if len(faces) > 0:
-                    # Find the largest face
-                    largest_face = max(faces, key=lambda rect: rect[2] * rect[3])
-                    x, y, w, h = largest_face
-                    
-                    # Extract and resize the face
-                    face_img = gray[y:y+h, x:x+w]
-                    face_img = cv2.resize(face_img, FACE_SIZE)
-                    
-                    # Enhance if requested
-                    if enhance:
-                        face_img = self.__face_enhancer.enhance_contrast(face_img)
-                    
-                    # Add to samples
-                    face_samples.append(face_img)
-                    print(f"Sample {len(face_samples)}/{num_samples} captured")
-                    
-                    # Show feedback
-                    cv2.imshow('Captured Face', face_img)
-                    cv2.waitKey(500)  # Show for half a second
-                    
-                    # Wait a moment before next capture
-                    time.sleep(0.5)
+                largest_face = max(faces, key=lambda rect: rect[2] * rect[3])
+                x, y, w, h = largest_face
+                
+                face_img = gray[y:y+h, x:x+w]
+                face_img = cv2.resize(face_img, FACE_SIZE)
+                
+                if enhance:
+                    face_img = self.__face_enhancer.enhance_contrast(face_img)
+                    face_img = self.__face_enhancer.reduce_noise(face_img) 
+                
+                face_samples.append(face_img)
+                print(f"Sample {len(face_samples)}/{num_samples} captured")
+                
+                cv2.imshow('Captured Face', face_img)
+                cv2.waitKey(500) 
+                
+                time.sleep(0.5)
                 
             elif key == ord('q'):
+                print("Face capture aborted.")
                 break
         
-        # Clean up
         cap.release()
         cv2.destroyAllWindows()
         
         if len(face_samples) > 0:
+            print(f"Captured {len(face_samples)} face samples.")
             return face_samples
         else:
+            print("No faces were captured.")
             return None
     
     def register_new_user(self):
         """Register a new user by capturing their face"""
-        name = input("Enter your name: ")
-        
-        # Clean the name for filename
+        name = input("Enter your name: ").strip()
+        if not name:
+            print("Name cannot be empty. Registration cancelled.")
+            return
+            
         filename = name.lower().replace(" ", "_")
         user_file = os.path.join(USERS_DIR, f"{filename}.pkl")
         
-        # Check if user already exists
+        user_data = {
+            'name': name,
+            'faces': []
+        }
+
         if os.path.exists(user_file):
-            choice = input(f"User {name} already exists! Do you want to add more face samples? (y/n): ")
-            if choice.lower() != 'y':
-                return
-            
-            # Load existing data
-            with open(user_file, 'rb') as f:
-                user_data = pickle.load(f)
-        else:
-            # Create new user data
-            user_data = {
-                'name': name,
-                'faces': []
-            }
+            print(f"User {name} already exists. Loading existing data to add more samples.")
+            try:
+                with open(user_file, 'rb') as f:
+                    user_data = pickle.load(f)
+            except Exception as e:
+                print(f"Error loading existing user data: {e}. Starting with new data.")
         
-        # Capture face samples
         face_samples = self.__capture_face(num_samples=5)
         
         if face_samples:
-            # Add new samples to existing faces
             user_data['faces'].extend(face_samples)
             
-            # Save user data
-            with open(user_file, 'wb') as f:
-                pickle.dump(user_data, f)
-            
-            print(f"User {name} registered successfully with {len(face_samples)} new face samples!")
-            print(f"Total face samples for {name}: {len(user_data['faces'])}")
+            try:
+                with open(user_file, 'wb') as f:
+                    pickle.dump(user_data, f)
+                print(f"User '{name}' registered successfully with {len(face_samples)} new face samples!")
+                print(f"Total face samples for '{name}': {len(user_data['faces'])}")
+            except Exception as e:
+                print(f"Error saving user data for {name}: {e}")
         else:
             print("Registration failed. No faces were captured.")
     
     def mark_attendance(self):
         """Mark attendance for an existing user"""
-        print("Looking for a registered face. Press 'q' to quit.")
+        print("Looking for a registered face. Please present your face to the camera. Press 'q' to quit.")
         
         cap = cv2.VideoCapture(0)
         
         if not cap.isOpened():
-            print("Error: Could not open camera")
+            print("Error: Could not open camera. Please check camera connection and permissions.")
             return
         
-        attendance_marked = False
+        attendance_marked_for_session = False
         start_time = time.time()
-        recognition_buffer = []  # To store recent recognitions
+        recognition_buffer = [] # To store recent recognitions
         
-        while time.time() - start_time < 30:  # Try for 30 seconds max
+        while time.time() - start_time < 30: # Try for 30 seconds max
             ret, frame = cap.read()
             if not ret:
-                print("Failed to grab frame")
+                print("Failed to grab frame.")
                 break
             
-            # Detect faces
+            frame = cv2.flip(frame, 1) 
+            
             faces, gray = self.__face_detector.detect_faces(frame)
             
-            # Process detected faces
-            for (x, y, w, h) in faces:
-                # Extract and resize the face
+            display_text = "Scanning..."
+            text_color = (0, 0, 255) # Red for unknown/scanning
+            
+            if len(faces) > 0:
+                print(f"DEBUG: Faces detected: {len(faces)}")
+                x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+                
                 face_img = gray[y:y+h, x:x+w]
                 face_img = cv2.resize(face_img, FACE_SIZE)
                 
-                # Enhance face image for better recognition
                 enhanced_face = self.__face_enhancer.enhance_contrast(face_img)
+                enhanced_face = self.__face_enhancer.reduce_noise(enhanced_face)
                 
-                # Try to identify the user
                 user, similarity = self.__face_recognizer.identify_user(enhanced_face)
                 
-                # Store in recognition buffer (for stability)
                 recognition_buffer.append((user, similarity))
-                if len(recognition_buffer) > 10:  # Keep last 10 recognitions
+                if len(recognition_buffer) > 15: 
                     recognition_buffer.pop(0)
                 
-                # Get most common user in buffer
-                if len(recognition_buffer) >= 5:
-                    # Filter non-None users
-                    valid_recognitions = [r for r in recognition_buffer if r[0] is not None]
+                print(f"DEBUG: Current recognition buffer ({len(recognition_buffer)}): {recognition_buffer}")
+
+                stable_user = None
+                if len(recognition_buffer) >= 2: 
+                    valid_recognitions = [r[0] for r in recognition_buffer if r[0] is not None]
                     
                     if valid_recognitions:
-                        # Count occurrences of each user
-                        user_counts = {}
-                        for u, _ in valid_recognitions:
-                            user_counts[u] = user_counts.get(u, 0) + 1
+                        user_counts = Counter(valid_recognitions)
+                        most_common_user, count = user_counts.most_common(1)[0]
                         
-                        # Get most frequent user
-                        stable_user = max(user_counts.items(), key=lambda x: x[1])[0]
-                        
-                        # Get average similarity for this user
-                        avg_similarity = sum([s for u, s in valid_recognitions if u == stable_user]) / user_counts[stable_user]
-                        
-                        # Use this for display and attendance
-                        user = stable_user
-                        similarity = avg_similarity
-                
-                # Draw rectangle
-                color = (0, 255, 0) if user else (0, 0, 255)
-                cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-                
-                # Display name if identified
+                        if count >= int(len(recognition_buffer) * 0.7): 
+                            stable_user = most_common_user
+                            avg_similarity = np.mean([s for u, s in recognition_buffer if u == stable_user])
+                            user = stable_user 
+                            similarity = avg_similarity
+                            print(f"DEBUG: Stable user identified: {stable_user} with avg similarity {avg_similarity:.2f}")
+
                 if user:
-                    text = f"{user} ({similarity:.2f})"
-                    cv2.putText(frame, text, (x, y-10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    display_text = f"Recognized: {user} ({similarity:.2f})"
+                    text_color = (0, 255, 0) # Green for recognized
                     
-                    # Mark attendance (after stable recognition)
-                    if not attendance_marked and len(recognition_buffer) >= 5:
-                        user_counts = {}
-                        for u, _ in [r for r in recognition_buffer if r[0] is not None]:
-                            user_counts[u] = user_counts.get(u, 0) + 1
+                    if stable_user and not attendance_marked_for_session:
+                        print(f"DEBUG: Checking attendance for stable user: {stable_user}")
+                        now = datetime.datetime.now()
+                        date_str = now.strftime("%Y-%m-%d")
+                        time_str = now.strftime("%H:%M:%S")
                         
-                        # Check if we have a stable recognition
-                        if user_counts.get(user, 0) >= 3:  # At least 3 occurrences
-                            # Get current date and time
-                            now = datetime.datetime.now()
-                            date_str = now.strftime("%Y-%m-%d")
-                            time_str = now.strftime("%H:%M:%S")
-                            
-                            # Create attendance file for today if it doesn't exist
-                            attendance_file = os.path.join(ATTENDANCE_DIR, f"{date_str}.txt")
+                        attendance_file = os.path.join(ATTENDANCE_DIR, f"{date_str}.txt")
+                        
+                        user_already_marked = False
+                        if os.path.exists(attendance_file):
+                            with open(attendance_file, "r") as f:
+                                for line in f:
+                                    if line.startswith(stable_user + ","):
+                                        user_already_marked = True
+                                        print(f"DEBUG: User '{stable_user}' already marked today.")
+                                        break
+                        
+                        if not user_already_marked:
                             if not os.path.exists(attendance_file):
                                 with open(attendance_file, "w") as f:
                                     f.write("Name,Time,Confidence\n")
+                                print(f"DEBUG: Created new attendance file: {attendance_file}")
                             
-                            # Check if user already marked attendance today
-                            user_already_marked = False
-                            if os.path.exists(attendance_file):
-                                with open(attendance_file, "r") as f:
-                                    for line in f:
-                                        if line.startswith(user + ","):
-                                            user_already_marked = True
-                                            break
+                            with open(attendance_file, "a") as f:
+                                f.write(f"{stable_user},{time_str},{similarity:.2f}\n")
                             
-                            if not user_already_marked:
-                                # Append attendance record
-                                with open(attendance_file, "a") as f:
-                                    f.write(f"{user},{time_str},{similarity:.2f}\n")
-                                
-                                print(f"Attendance marked for {user} at {time_str}")
-                                attendance_marked = True
-                            else:
-                                print(f"{user} already marked attendance today.")
-                                attendance_marked = True
+                            print(f"ATTENDANCE MARKED: '{stable_user}' at {time_str} with confidence {similarity:.2f}")
+                            attendance_marked_for_session = True 
+                            display_text = f"Attendance Marked: {stable_user}!"
+                            text_color = (255, 0, 0) 
+                            time.sleep(2) 
+                            break 
+                        else:
+                            display_text = f"{stable_user} already marked attendance today."
+                            text_color = (0, 255, 255) 
+                            attendance_marked_for_session = True 
+                            time.sleep(2) 
+                            break 
                 else:
-                    cv2.putText(frame, "Unknown", (x, y-10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    display_text = "Unknown Face"
+                    text_color = (0, 0, 255) 
+                
+                cv2.rectangle(frame, (x, y), (x+w, y+h), text_color, 2)
+                cv2.putText(frame, display_text, (x, y-10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_color, 2)
+            else:
+                display_text = "No face detected"
+                text_color = (0, 0, 255) 
+
+            cv2.putText(frame, f"Threshold: {self.__face_recognizer.threshold:.2f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            cv2.putText(frame, "Press 'q' to quit", (10, 60), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
-            # Display threshold info
-            threshold_text = f"Recognition Threshold: {self.__face_recognizer.threshold:.2f}"
-            cv2.putText(frame, threshold_text, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            
-            # Display info
-            cv2.putText(frame, "Press 'q' to quit", 
-                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            
-            # Display the frame
             cv2.imshow('Mark Attendance', frame)
             
-            # Check for key press
             if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("Attendance marking aborted.")
                 break
         
-        # Clean up
         cap.release()
         cv2.destroyAllWindows()
         
-        if not attendance_marked:
-            print("No registered face was recognized.")
+        if not attendance_marked_for_session:
+            print("No registered face was recognized or attendance was not marked within the time limit.")
     
     def view_attendance(self):
         """View attendance records"""
-        # List all attendance files
         attendance_files = [f for f in os.listdir(ATTENDANCE_DIR) if f.endswith('.txt')]
         
         if not attendance_files:
             print("No attendance records found.")
             return
         
-        # Sort files by date (newest first)
-        attendance_files.sort(reverse=True)
+        attendance_files.sort(reverse=True) 
         
-        # Let user choose a date
-        print("Available dates:")
+        print("\n--- Available Attendance Dates ---")
         for i, filename in enumerate(attendance_files):
             date = filename.split('.')[0]
             print(f"{i+1}. {date}")
+        print("----------------------------------")
         
-        choice = input("Select a date (number) or 'all' to see all records: ")
+        choice = input("Select a date (number) or 'all' to see all records: ").strip()
         
         if choice.lower() == 'all':
-            # Show all attendance records
             for filename in attendance_files:
                 date = filename.split('.')[0]
                 print(f"\n--- Attendance for {date} ---")
-                
-                with open(os.path.join(ATTENDANCE_DIR, filename), "r") as f:
-                    lines = f.readlines()
-                    for line in lines:
-                        print(line.strip())
+                try:
+                    with open(os.path.join(ATTENDANCE_DIR, filename), "r") as f:
+                        lines = f.readlines()
+                        if not lines:
+                            print("    No records for this date.")
+                            continue
+                        for line in lines:
+                            print(line.strip())
+                except Exception as e:
+                    print(f"Error reading {filename}: {e}")
         else:
             try:
                 index = int(choice) - 1
@@ -559,97 +558,108 @@ class AttendanceSystem:
                     filename = attendance_files[index]
                     date = filename.split('.')[0]
                     print(f"\n--- Attendance for {date} ---")
-                    
                     with open(os.path.join(ATTENDANCE_DIR, filename), "r") as f:
                         lines = f.readlines()
+                        if not lines:
+                            print("No records for this date.")
                         for line in lines:
                             print(line.strip())
                 else:
-                    print("Invalid selection.")
+                    print("Invalid selection. Please enter a valid number.")
             except ValueError:
-                print("Invalid input.")
+                print("Invalid input. Please enter a number or 'all'.")
     
     def adjust_sensitivity(self):
         """Adjust face recognition sensitivity"""
-        print(f"Current recognition threshold: {self.__face_recognizer.threshold}")
-        print("Lower values make recognition more lenient (more matches)")
-        print("Higher values make recognition more strict (fewer matches)")
+        print(f"Current recognition threshold: {self.__face_recognizer.threshold:.2f}")
+        print("Lower values (e.g., 0.4) make recognition more lenient (easier to match).")
+        print("Higher values (e.g., 0.8) make recognition more strict (harder to match).")
         
         try:
-            new_threshold = float(input("Enter new threshold (0.1-0.9): "))
+            new_threshold_str = input("Enter new threshold (0.1-0.9): ").strip()
+            if not new_threshold_str:
+                print("No input provided. Threshold remains unchanged.")
+                return
+
+            new_threshold = float(new_threshold_str)
             if 0.1 <= new_threshold <= 0.9:
                 self.__face_recognizer.threshold = new_threshold
-                print(f"Recognition threshold updated to {self.__face_recognizer.threshold}")
+                print(f"Recognition threshold updated to {self.__face_recognizer.threshold:.2f}")
             else:
-                print("Invalid value. Threshold must be between 0.1 and 0.9")
+                print("Invalid value. Threshold must be between 0.1 and 0.9.")
         except ValueError:
-            print("Invalid input. Please enter a number.")
+            print("Invalid input. Please enter a numerical value.")
     
     def improve_face(self):
         """Face enhancement demo with visualization"""
-        # Capture a single face image
+        print("Capturing a single face for enhancement demonstration...")
         face_samples = self.__capture_face(num_samples=1, enhance=False)
         
         if not face_samples:
-            print("No face captured.")
+            print("No face captured for enhancement demo.")
             return
         
         face_img = face_samples[0]
         
-        # Create a window for displaying enhancements
-        cv2.namedWindow("Face Enhancements", cv2.WINDOW_NORMAL)
+        if len(face_img.shape) > 2:
+            face_img_gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+        else:
+            face_img_gray = face_img
+
+        enhanced_contrast = self.__face_enhancer.enhance_contrast(face_img_gray)
+        reduced_noise = self.__face_enhancer.reduce_noise(face_img_gray)
+        sharpened = self.__face_enhancer.sharpen(face_img_gray)
+        adaptive_thresh = self.__face_enhancer.adaptive_threshold(face_img_gray)
         
-        # Create a comparison image with original and various enhancements
-        enhanced_contrast = self.__face_enhancer.enhance_contrast(face_img)
-        reduced_noise = self.__face_enhancer.reduce_noise(face_img)
-        sharpened = self.__face_enhancer.sharpen(face_img)
+        display_size = (300, 300) 
+        face_img_display = cv2.resize(face_img_gray, display_size)
+        enhanced_contrast_display = cv2.resize(enhanced_contrast, display_size)
+        reduced_noise_display = cv2.resize(reduced_noise, display_size)
+        sharpened_display = cv2.resize(sharpened, display_size)
+        adaptive_thresh_display = cv2.resize(adaptive_thresh, display_size) 
         
-        # Create a 2x2 grid
-        top_row = np.hstack((face_img, enhanced_contrast))
-        bottom_row = np.hstack((reduced_noise, sharpened))
-        comparison = np.vstack((top_row, bottom_row))
+        def add_label(img, label):
+            display_img = img.copy()
+            if len(display_img.shape) < 3:
+                display_img = cv2.cvtColor(display_img, cv2.COLOR_GRAY2BGR)
+            cv2.putText(display_img, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            return display_img
+
+        top_left = add_label(face_img_display, "Original")
+        top_right = add_label(enhanced_contrast_display, "Contrast Enhanced")
+        top_row_display = np.hstack((top_left, top_right))
+
+        bottom_left = add_label(reduced_noise_display, "Noise Reduced")
+        bottom_right = add_label(sharpened_display, "Sharpened")
+        bottom_row_display = np.hstack((bottom_left, bottom_right))
         
-        # Add labels
-        label_height = 20
-        labels_top = np.ones((label_height, top_row.shape[1]), dtype=np.uint8) * 255
-        cv2.putText(labels_top, "Original", (face_img.shape[1]//4, 15), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, 0, 1)
-        cv2.putText(labels_top, "Enhanced Contrast", (face_img.shape[1] + face_img.shape[1]//4, 15), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, 0, 1)
+        comparison_display = np.vstack((top_row_display, bottom_row_display))
+
+        cv2.imshow("Face Enhancements Demo", comparison_display)
         
-        labels_bottom = np.ones((label_height, bottom_row.shape[1]), dtype=np.uint8) * 255
-        cv2.putText(labels_bottom, "Noise Reduction", (face_img.shape[1]//4, 15), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, 0, 1)
-        cv2.putText(labels_bottom, "Sharpened", (face_img.shape[1] + face_img.shape[1]//4, 15), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, 0, 1)
-        
-        full_display = np.vstack((labels_top, top_row, labels_bottom, bottom_row))
-        
-        # Show the comparison
-        cv2.imshow("Face Enhancements", full_display)
-        
-        print("Press any key to close the window...")
+        print("Displaying face enhancement effects. Press any key to close the window...")
         cv2.waitKey(0)
         cv2.destroyAllWindows()
         
         print("\nFace enhancement techniques demonstrated:")
-        print("1. Histogram Equalization - Improves contrast and helps with uneven lighting")
-        print("2. Gaussian Blur - Reduces noise which can improve recognition accuracy")
-        print("3. Sharpening - Enhances details for better feature extraction")
-        print("\nThese techniques are automatically applied during face recognition.")
+        print("1. **Histogram Equalization**: Improves contrast, especially in uneven lighting.")
+        print("2. **Gaussian Blur**: Reduces image noise, which can help with recognition accuracy.")
+        print("3. **Sharpening (Unsharp Masking)**: Enhances edges and details for better feature extraction.")
+        print("\nThese techniques are applied automatically to detected faces before recognition.")
     
     def run(self):
         """Run the main menu loop"""
         while True:
-            print("\n===== FACIAL ATTENDANCE SYSTEM =====")
+            print("\n--- FACIAL ATTENDANCE SYSTEM MENU ---")
             print("1. Mark Attendance (Existing User)")
             print("2. Register New User")
             print("3. View Attendance Records")
             print("4. Adjust Recognition Sensitivity")
-            print("5. Improve Face")
+            print("5. Demonstrate Face Enhancement")
             print("6. Exit")
+            print("-------------------------------------")
             
-            choice = input("\nEnter your choice (1-6): ")
+            choice = input("Enter your choice (1-6): ").strip()
             
             if choice == '1':
                 self.mark_attendance()
@@ -662,12 +672,11 @@ class AttendanceSystem:
             elif choice == '5':
                 self.improve_face()
             elif choice == '6':
-                print("Thank you for using the Facial Attendance System!")
+                print("Thank you for using the Facial Attendance System! Goodbye.")
                 break
             else:
-                print("Invalid choice. Please try again.")
+                print("Invalid choice. Please enter a number between 1 and 6.")
 
-# Main entry point
 if __name__ == "__main__":
     system = AttendanceSystem()
     system.run()
